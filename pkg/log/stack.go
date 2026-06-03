@@ -12,7 +12,10 @@ import (
 	"github.com/valyala/bytebufferpool"
 )
 
-// Callers returns an iterator over the call stack frames.
+// Callers returns an iterator over call stack frames starting from the caller.
+// The skip parameter indicates how many frames to skip before recording (skip=0
+// includes the frame of the Callers call itself). Frames are returned lazily via
+// an iterator, allowing efficient processing of potentially large stacks.
 func Callers(skip int) iter.Seq[Frame] {
 	return func(yield func(Frame) bool) {
 		const framePageSize = 32
@@ -49,6 +52,8 @@ func (f Frame) FileLine() (string, int) {
 	return "unknown", 0
 }
 
+// Function returns the full qualified function name for the frame
+// (e.g., "github.com/user/package.(*Type).Method"), or "unknown" if unavailable.
 func (f Frame) Function() string {
 	fn := runtime.FuncForPC(f.pc())
 	if fn != nil {
@@ -57,16 +62,21 @@ func (f Frame) Function() string {
 	return "unknown"
 }
 
+// FunctionShort returns the short function name without the package path
+// (e.g., "(*Type).Method" from the full "github.com/user/package.(*Type).Method").
 func (f Frame) FunctionShort() string {
 	fn := f.Function()
 	parts := strings.Split(fn, "/")
 	return parts[len(parts)-1]
 }
 
+// Equals reports whether the frame points to the same code location as another frame.
 func (f Frame) Equals(other Frame) bool {
 	return uintptr(f) == uintptr(other)
 }
 
+// LogValue returns a structured log value representation of the frame in the format
+// "function (file:line)", suitable for use in log attributes.
 func (f Frame) LogValue() slog.Value {
 	file, line := f.FileLine()
 	function := f.Function()
@@ -74,16 +84,26 @@ func (f Frame) LogValue() slog.Value {
 	return slog.StringValue(fmt.Sprintf("%s (%s:%d)", function, file, line))
 }
 
+// Stacker is implemented by types that carry stack trace information.
 type Stacker interface {
+	// Stack returns the call stack frames captured at the time of creation.
 	Stack() Stack
 }
 
+// StackTrimmer is implemented by types that can remove redundant common frames
+// from their stack traces (e.g., removing frames that are common to a parent call).
 type StackTrimmer interface {
+	// TrimStack removes stack frames that are common with the parent Stack,
+	// returning a new error with the trimmed stack. If no trimming is possible, returns itself.
 	TrimStack(parent Stack) error
 }
 
+// Stack is a sequence of call stack frames.
 type Stack []Frame
 
+// Trim removes trailing frames from the stack that match the parent stack,
+// reducing redundancy when stacks are nested. Returns the trimmed stack and
+// a boolean indicating whether any frames were removed.
 func (s Stack) Trim(parent Stack) (Stack, bool) {
 	count := len(s)
 	otherCount := len(parent)
@@ -105,12 +125,15 @@ func (s Stack) Trim(parent Stack) (Stack, bool) {
 	return s[:count-idx], idx > 0
 }
 
+// LogValue returns a structured log value representation of the stack as an array of strings.
 func (s Stack) LogValue() slog.Value {
 	return slog.AnyValue(lo.Map(s, func(item Frame, _ int) string {
 		return item.LogValue().String()
 	}))
 }
 
+// NewStack captures the current call stack and returns it as a Stack.
+// The skip parameter indicates how many frames to skip (skip=0 starts at the caller of NewStack).
 func NewStack(skip int) Stack {
 	var s Stack
 	for f := range Callers(skip + 1) {
@@ -119,16 +142,24 @@ func NewStack(skip int) Stack {
 	return s
 }
 
+// BackTracer is implemented by types that can render their error chain as a formatted backtrace.
 type BackTracer interface {
+	// BackTrace returns a byte representation of the error chain formatted for display.
 	BackTrace() []byte
 }
 
+// Decorator is implemented by error types that decorate or wrap other errors
+// with additional context or metadata.
 type Decorator interface {
 	error
+	// IsDecorator marks this error as a decorator. It distinguishes decorators
+	// from regular errors to enable special handling in logging and error tracing.
 	IsDecorator()
 }
 
+// Messager is implemented by types that provide a message string for logging.
 type Messager interface {
+	// Message returns the primary message for this error.
 	Message() string
 }
 
@@ -190,6 +221,9 @@ func newSimple(message string, cause error) error {
 	return result
 }
 
+// WrapSentinel wraps a cause error with an additional message, creating a decorator
+// error without capturing a new stack. Use when you want to annotate an error with
+// context but preserve the original stack trace from the cause.
 func WrapSentinel(cause error, message string) error {
 	result := &simple{
 		message: message,
@@ -198,6 +232,8 @@ func WrapSentinel(cause error, message string) error {
 	return result
 }
 
+// NewSentinel creates a sentinel error with the given message and no cause.
+// Use for root errors that mark specific error conditions without wrapping an underlying error.
 func NewSentinel(message string) error {
 	result := &simple{
 		message: message,
@@ -206,10 +242,16 @@ func NewSentinel(message string) error {
 	return result
 }
 
+// Unwrapper is implemented by error types that can unwrap to reveal underlying causes.
 type Unwrapper interface {
+	// Unwrap returns the underlying error (for single errors) or nil if none.
 	Unwrap() error
 }
 
+// BackTrace renders a formatted backtrace for an error chain. It processes errors
+// recursively, starting from the root cause and tracing through all wrapped errors.
+// Each error's message and stack trace (if available) are included. Returns a
+// formatted byte representation suitable for display or logging.
 func BackTrace(err error) []byte {
 	buffer := bytebufferpool.Get()
 	defer bytebufferpool.Put(buffer)
@@ -269,6 +311,9 @@ func isInteresting(err error) bool {
 	return true
 }
 
+// ErrorString combines a message and cause error into a single error string.
+// If cause is nil, returns just the message. Otherwise returns "message: cause.Error()".
+// Useful for constructing error messages from components.
 func ErrorString(message string, cause error) string {
 	if cause == nil {
 		return message
@@ -276,6 +321,8 @@ func ErrorString(message string, cause error) string {
 	return fmt.Sprintf("%s: %s", message, cause.Error())
 }
 
+// LogValues creates a structured attribute map for logging an error with its message,
+// cause chain, and stack trace. Returns a map suitable for use with slog.Any().
 func LogValues(message string, cause error, stack Stack) map[string]any {
 	const logKeyMessage = "message"
 	const logKeyStack = "stack"
@@ -300,8 +347,12 @@ func LogValues(message string, cause error, stack Stack) map[string]any {
 	return result
 }
 
+// MessageSeparator is the string used to separate multiple messages in error chains (": ").
 const MessageSeparator = ": "
 
+// Message extracts the primary message from an error. If the error implements Messager,
+// its Message() method is called. Otherwise, the error string is split on MessageSeparator
+// and the first component is returned.
 func Message(err error) string {
 	if messager, ok := err.(Messager); ok {
 		return messager.Message()
@@ -311,6 +362,8 @@ func Message(err error) string {
 	return message[0]
 }
 
+// Messages splits an error string on MessageSeparator to extract all message components.
+// Useful for analyzing multi-level error messages created by wrapping errors.
 func Messages(err error) []string {
 	return strings.Split(err.Error(), MessageSeparator)
 }
