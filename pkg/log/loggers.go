@@ -134,6 +134,11 @@ type LoggerOption func(*loggerOptions)
 // WithWriter sets the output writer for console logging.
 // If not specified, defaults to os.Stdout.
 func WithWriter(w io.Writer) LoggerOption {
+	return func(o *loggerOptions) {
+		if o.console == nil {
+			o.console = &consoleOptions{}
+		}
+		o.console.writer = w
 	}
 }
 
