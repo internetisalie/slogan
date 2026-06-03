@@ -28,6 +28,10 @@ const (
 	ansiBrightWhite   = "\033[97m"
 )
 
+// HumanHandler outputs log records as formatted multi-line human-readable text.
+// This handler formats each record with optional ANSI color codes for terminals,
+// including timestamp, level, message, and attributes in an easy-to-read layout.
+// HumanHandler is thread-safe.
 type HumanHandler struct {
 	opts   slog.HandlerOptions
 	attrs  []slog.Attr
@@ -36,6 +40,8 @@ type HumanHandler struct {
 	out    io.Writer
 }
 
+// NewHumanHandler creates a new HumanHandler that outputs human-readable logs to the given writer.
+// If opts is nil, a default HandlerOptions with LevelInfo is used.
 func NewHumanHandler(out io.Writer, opts *slog.HandlerOptions) *HumanHandler {
 	h := &HumanHandler{out: out, mu: &sync.Mutex{}}
 	if opts != nil {

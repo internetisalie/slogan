@@ -18,12 +18,18 @@ func (e errorHandler) Handle(ctx context.Context, record slog.Record) error {
 	return e.Handler.Handle(ctx, record)
 }
 
+// PlainHandler outputs log records as plain text (message only), without structure.
+// This is useful for scenarios where only the message text is desired (e.g., writing
+// to the console of a containerized application) or for compatibility with systems
+// that don't support structured logging. PlainHandler is thread-safe.
 type PlainHandler struct {
 	opts slog.HandlerOptions
 	mu   *sync.Mutex
 	out  io.Writer
 }
 
+// NewPlainHandler creates a new PlainHandler that writes plain text log messages to the given writer.
+// If opts is nil, a default HandlerOptions with LevelInfo is used.
 func NewPlainHandler(out io.Writer, opts *slog.HandlerOptions) *PlainHandler {
 	h := &PlainHandler{out: out, mu: &sync.Mutex{}}
 	if opts != nil {

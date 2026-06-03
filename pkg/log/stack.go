@@ -38,12 +38,17 @@ func Callers(skip int) iter.Seq[Frame] {
 	}
 }
 
+// Frame represents a single program counter (PC) value within a call stack.
+// It wraps a uintptr and provides methods to extract function and file/line information.
+// Frame values are used in Stack traces to represent individual stack frames.
 type Frame uintptr
 
 func (f Frame) pc() uintptr {
 	return uintptr(f) - 1
 }
 
+// FileLine returns the source file path and line number for this frame.
+// Returns ("unknown", 0) if the file/line information cannot be determined.
 func (f Frame) FileLine() (string, int) {
 	fn := runtime.FuncForPC(f.pc())
 	if fn != nil {

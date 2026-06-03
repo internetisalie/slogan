@@ -13,6 +13,9 @@ import (
 	"github.com/samber/lo"
 )
 
+// AddGroup appends a group name to a group path slice and returns the new slice.
+// This is used internally to track the nesting path of grouped attributes.
+// Example: AddGroup([]string{"user"}, "profile") returns []string{"user", "profile"}.
 func AddGroup(groups []string, group string) []string {
 	result := make([]string, len(groups)+1)
 	copy(result, groups)
@@ -20,6 +23,10 @@ func AddGroup(groups []string, group string) []string {
 	return result
 }
 
+// GetValueAtPath retrieves an attribute value from a nested attribute structure
+// by following a path of keys. Returns the value and true if found, or an empty
+// value and false if the path doesn't exist. Useful for accessing deeply nested attributes.
+// Example: GetValueAtPath(attrs, "user", "profile", "name") retrieves the nested name value.
 func GetValueAtPath(attrs []slog.Attr, p ...string) (slog.Value, bool) {
 	here := slog.GroupValue(attrs...)
 
@@ -48,6 +55,9 @@ func GetValueAtPath(attrs []slog.Attr, p ...string) (slog.Value, bool) {
 	return here.Resolve(), true
 }
 
+// SetAttrsAtPath inserts or updates attributes at a nested path within a parent attribute tree.
+// If the path doesn't exist, it creates the necessary groups to hold the attributes.
+// Returns a new attribute slice with the changes; the original is not modified.
 func SetAttrsAtPath(parentAttrs []slog.Attr, groups []string, attrs []slog.Attr) []slog.Attr {
 	if len(groups) == 0 {
 		return MergeAttrs(parentAttrs, attrs)
@@ -75,6 +85,9 @@ func SetAttrsAtPath(parentAttrs []slog.Attr, groups []string, attrs []slog.Attr)
 	return newAttrs
 }
 
+// MergeAttrs combines two attribute slices with merge semantics. If both slices
+// contain an attribute with the same key, and both are groups, they are recursively merged.
+// Otherwise, the add value replaces the current value. Returns a new merged attribute slice.
 func MergeAttrs(current []slog.Attr, add []slog.Attr) []slog.Attr {
 	newAttrs := make([]slog.Attr, len(current), len(current)+len(add))
 	copy(newAttrs, current)
@@ -124,6 +137,9 @@ func MapAttrs(values map[string]any) []slog.Attr {
 	return results
 }
 
+// SliceAttrs converts a reflect.Value representing a slice or array into a slice of slog.Attr.
+// Each element becomes an attribute with its index as the key (0, 1, 2, ...).
+// Useful for including array/slice data in structured logs.
 func SliceAttrs(value reflect.Value) []slog.Attr {
 	results := make([]slog.Attr, value.Len())
 	for i := 0; i < len(results); i++ {
@@ -132,6 +148,9 @@ func SliceAttrs(value reflect.Value) []slog.Attr {
 	return results
 }
 
+// Attr creates an slog.Attr from a key and value. If the value implements slog.LogValuer,
+// its LogValue method is called first. Otherwise, Value() is used to convert the value
+// to an appropriate slog.Value type. This is the primary function for creating attributes.
 func Attr(k string, v any) slog.Attr {
 	if vt, ok := v.(slog.LogValuer); ok {
 		return slog.Attr{
@@ -145,6 +164,16 @@ func Attr(k string, v any) slog.Attr {
 	}
 }
 
+// Value converts a Go value into an slog.Value. Supports:
+// - encoding.TextMarshaler: Converted to string via MarshalText
+// - fmt.Stringer: Converted to string via String()
+// - time.Time: RFC3339Nano formatted string
+// - time.Duration: String representation
+// - Network types: IP addresses and ports converted to strings
+// - Integers, floats, bools, strings: Direct conversion
+// - Maps: Converted to attribute groups
+// - Slices/arrays: Converted to attribute groups via SliceAttrs
+// - Other types: Reflection-based conversion
 func Value(v any) slog.Value {
 	if vt, ok := v.(encoding.TextMarshaler); ok {
 		b, _ := vt.MarshalText()
