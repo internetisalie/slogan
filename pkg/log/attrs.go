@@ -24,6 +24,7 @@ func GetValueAtPath(attrs []slog.Attr, p ...string) (slog.Value, bool) {
 	here := slog.GroupValue(attrs...)
 
 	for len(p) > 0 {
+		here = here.Resolve()
 		if here.Kind() != slog.KindGroup {
 			return slog.Value{}, false
 		}
@@ -44,7 +45,7 @@ func GetValueAtPath(attrs []slog.Attr, p ...string) (slog.Value, bool) {
 		p = p[1:]
 	}
 
-	return here, true
+	return here.Resolve(), true
 }
 
 func SetAttrsAtPath(parentAttrs []slog.Attr, groups []string, attrs []slog.Attr) []slog.Attr {
