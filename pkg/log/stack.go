@@ -116,9 +116,10 @@ func (s Stack) Trim(parent Stack) (Stack, bool) {
 		return s, false
 	}
 
-	// Trim matching stack traces
-	idx := 1
-	for s[count-idx-1].Equals(parent[otherCount-idx-1]) && otherCount > idx+1 {
+	// Trim matching stack traces from the end of the stack that are common with parent.
+	// Compare frames from the end backwards until a mismatch is found.
+	idx := 0
+	for idx < otherCount && idx < count && s[count-1-idx].Equals(parent[otherCount-1-idx]) {
 		idx++
 	}
 

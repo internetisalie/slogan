@@ -45,6 +45,7 @@ type realEnv struct{}
 func (realEnv) Getenv(key string) string       { return os.Getenv(key) }
 func (realEnv) Setenv(key, value string) error { return os.Setenv(key, value) }
 
+var env environment = realEnv{}
 
 // NewConsoleHandler creates an slog.Handler that writes logs to a writer with the
 // specified format. If writer is nil, uses os.Stdout. If format is empty, auto-detects
@@ -109,6 +110,11 @@ func NewConsoleHandler(ho *slog.HandlerOptions, writer io.Writer, format string)
 		console = NewHumanHandler(writer, ho)
 	case FormatPlain:
 		console = NewPlainHandler(writer, ho)
+	default:
+		StandardLogger().Warn(fmt.Sprintf(
+			"Unknown log format %q. Defaulting to %q",
+			format, FormatDefault))
+		console = slog.NewTextHandler(writer, ho)
 	}
 	return console
 }
