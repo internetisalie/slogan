@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/valyala/bytebufferpool"
 )
 
 // ANSI modes
@@ -49,20 +51,17 @@ func (h *HumanHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return level >= h.opts.Level.Level()
 }
 
-// !+WithGroup
+// WithGroup adds a new group to the handler.
 func (h *HumanHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
 	h2 := *h
-	// Add an unopened group to h2 without modifying h.
 	h2.groups = AddGroup(h.groups, name)
 	return &h2
 }
 
-//!-WithGroup
-
-// !+WithAttrs
+// WithAttrs adds attributes to the handler.
 func (h *HumanHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(attrs) == 0 {
 		return h
@@ -72,29 +71,23 @@ func (h *HumanHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &h2
 }
 
-//!-WithAttrs
-
-// !+Handle
+// Handle processes a log record and writes it to the output.
 func (h *HumanHandler) Handle(ctx context.Context, r slog.Record) error {
-	bufp := allocBuf()
-	buf := *bufp
-	defer func() {
-		*bufp = buf
-		freeBuf(bufp)
-	}()
+	buf := bytebufferpool.Get()
+	defer bytebufferpool.Put(buf)
 
 	// write time
 	if !r.Time.IsZero() {
-		buf = h.appendAttr(buf, slog.Time(slog.TimeKey, r.Time), 0)
+		buf.B = h.appendAttr(buf.B, slog.Time(slog.TimeKey, r.Time), 0)
 	}
 
 	// write level
-	buf = h.appendAttr(buf, slog.Any(slog.LevelKey, r.Level), 0)
+	buf.B = h.appendAttr(buf.B, slog.Any(slog.LevelKey, r.Level), 0)
 
 	// write logger
 	for _, attr := range h.attrs {
 		if attr.Key == LoggerKey {
-			buf = h.appendAttr(buf, attr, 0)
+			buf.B = h.appendAttr(buf.B, attr, 0)
 			break
 		}
 	}
@@ -104,45 +97,44 @@ func (h *HumanHandler) Handle(ctx context.Context, r slog.Record) error {
 		fs := runtime.CallersFrames([]uintptr{r.PC})
 		f, _ := fs.Next()
 		// Optimize to minimize allocation.
-		srcbufp := allocBuf()
-		defer freeBuf(srcbufp)
+		srcbuf := bytebufferpool.Get()
+		defer bytebufferpool.Put(srcbuf)
 		if f.File != "" {
 			dir, file := filepath.Split(f.File)
-			*srcbufp = append(*srcbufp, filepath.Base(dir)...)
-			*srcbufp = append(*srcbufp, filepath.Separator)
-			*srcbufp = append(*srcbufp, file...)
-			*srcbufp = append(*srcbufp, ':')
-			*srcbufp = strconv.AppendInt(*srcbufp, int64(f.Line), 10)
-			buf = h.appendAttr(buf, slog.String(slog.SourceKey, string(*srcbufp)), 0)
+			srcbuf.B = append(srcbuf.B, filepath.Base(dir)...)
+			srcbuf.B = append(srcbuf.B, filepath.Separator)
+			srcbuf.B = append(srcbuf.B, file...)
+			srcbuf.B = append(srcbuf.B, ':')
+			srcbuf.B = strconv.AppendInt(srcbuf.B, int64(f.Line), 10)
+			buf.B = h.appendAttr(buf.B, slog.String(slog.SourceKey, string(srcbuf.B)), 0)
 		}
 	}
 
 	// write message
-	buf = h.appendAttr(buf, slog.String(slog.MessageKey, r.Message), -1)
+	buf.B = h.appendAttr(buf.B, slog.String(slog.MessageKey, r.Message), -1)
 
 	// add handler-stored attributes
 	for _, attr := range h.attrs {
 		if attr.Key == LoggerKey {
 			continue
 		}
-		buf = h.appendAttr(buf, attr, 1)
+		buf.B = h.appendAttr(buf.B, attr, 1)
 	}
 
 	if r.NumAttrs() > 0 {
 		// add record-stored attributes
 		r.Attrs(func(a slog.Attr) bool {
-			buf = h.appendAttr(buf, a, len(h.groups)+1)
+			buf.B = h.appendAttr(buf.B, a, len(h.groups)+1)
 			return true
 		})
 	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, err := h.out.Write(buf)
+	_, err := h.out.Write(buf.B)
 	return err
 }
 
-// !-Handle
 func (h *HumanHandler) appendAttr(buf []byte, a slog.Attr, indentLevel int) []byte {
 	// Resolve the Attr's value before doing anything else.
 	a.Value = a.Value.Resolve()
@@ -271,26 +263,3 @@ func (h *HumanHandler) appendKey(buf []byte, name string, trailer string) []byte
 	buf = append(buf, trailer...)
 	return buf
 }
-
-// !+pool
-var bufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 1024)
-		return &b
-	},
-}
-
-func allocBuf() *[]byte {
-	return bufPool.Get().(*[]byte)
-}
-
-func freeBuf(b *[]byte) {
-	// To reduce peak allocation, return only smaller buffers to the pool.
-	const maxBufferSize = 16 << 10
-	if cap(*b) <= maxBufferSize {
-		*b = (*b)[:0]
-		bufPool.Put(b)
-	}
-}
-
-//!-pool
