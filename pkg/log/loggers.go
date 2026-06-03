@@ -5,19 +5,27 @@
 package log
 
 import (
-	"bufio"
 	"io"
-	"log"
 	"log/slog"
 	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 
+	"github.com/samber/lo"
 	"github.com/samber/slog-multi"
 )
 
-const FrameworkRootLogger = "glimmer"
+const RootLoggerName = "slogan"
+
+const (
+	ErrorKey        = "error"
+	ErrorMessageKey = "message"
+	ErrorStackKey   = "stack"
+
+	LoggerKey    = "logger"
+	OperationKey = "operation"
+)
 
 const (
 	FormatTimestampMicro = "2006-01-02T15:04:05.000000Z07:00"
@@ -29,9 +37,13 @@ var (
 	standardLoggerOnce sync.Once
 )
 
+// StandardLogger returns the global framework-level logger singleton (named "slogan").
+// Consumers should generally prefer NewLogger or NewPackageLogger for application
+// logic to ensure logs are properly scoped and searchable. StandardLogger is
+// intended for high-level lifecycle events or framework diagnostic logging.
 func StandardLogger() *slog.Logger {
 	standardLoggerOnce.Do(func() {
-		standardLogger = NewLogger(FrameworkRootLogger)
+		standardLogger = NewLogger(RootLoggerName)
 	})
 
 	return standardLogger
@@ -42,7 +54,7 @@ func LoggingLogger() *slog.Logger {
 	handler := NewConsoleHandler(&slog.HandlerOptions{
 		Level:       LevelTrace,
 		ReplaceAttr: NewTimestampAttrReplacer(nil, FormatTimestampMicro).ReplaceAttr,
-	})
+	}, nil, "")
 	return slog.New(handler)
 }
 
@@ -81,28 +93,139 @@ func PackageLoggerName(skip int) string {
 	return strings.Join(packageParts, ".")
 }
 
+type consoleOptions struct {
+	writer io.Writer
+	format string
+}
+
+type loggerOptions struct {
+	console    *consoleOptions
+	attrs      []slog.Attr
+	timeFormat string
+	sanitizers []Sanitizer
+	leveler    slog.Leveler
+	handlers   []slog.Handler
+	middleware []slogmulti.Middleware
+	addSource  bool
+}
+
+type LoggerOption func(*loggerOptions)
+
+func WithWriter(w io.Writer) LoggerOption {
+	return func(o *loggerOptions) {
+		if o.console == nil {
+			o.console = &consoleOptions{}
+		}
+		o.console.writer = w
+	}
+}
+
+func WithAttrs(attrs ...slog.Attr) LoggerOption {
+	return func(o *loggerOptions) {
+		o.attrs = append(o.attrs, attrs...)
+	}
+}
+
+func WithTimeFormat(f string) LoggerOption {
+	return func(o *loggerOptions) {
+		o.timeFormat = f
+	}
+}
+
+func WithSanitizers(s ...Sanitizer) LoggerOption {
+	return func(o *loggerOptions) {
+		o.sanitizers = append(o.sanitizers, s...)
+	}
+}
+
+func WithFormat(f string) LoggerOption {
+	return func(o *loggerOptions) {
+		if o.console == nil {
+			o.console = &consoleOptions{}
+		}
+		o.console.format = f
+	}
+}
+
+func WithLeveler(l slog.Leveler) LoggerOption {
+	return func(o *loggerOptions) {
+		o.leveler = l
+	}
+}
+
+func WithHandlers(handlers ...slog.Handler) LoggerOption {
+	return func(o *loggerOptions) {
+		o.handlers = append(o.handlers, handlers...)
+	}
+}
+
+func WithMiddleware(middleware ...slogmulti.Middleware) LoggerOption {
+	return func(o *loggerOptions) {
+		o.middleware = append(o.middleware, middleware...)
+	}
+}
+
+func WithAddSource(addSource bool) LoggerOption {
+	return func(o *loggerOptions) {
+		o.addSource = addSource
+	}
+}
+
+func WithoutConsole() LoggerOption {
+	return func(o *loggerOptions) {
+		o.console = nil
+	}
+}
+
 func NewLogger(name string, attrs ...slog.Attr) *slog.Logger {
+	return NewLoggerWithOpts(name, WithAttrs(attrs...), WithHandlers(NewRemoteHandler()))
+}
+
+func NewLoggerWithOpts(name string, opts ...LoggerOption) *slog.Logger {
+	o := &loggerOptions{
+		console:    &consoleOptions{},
+		timeFormat: FormatTimestampMicro,
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+
 	var replacer AttrReplacer
 
 	// Inject our replacer middleware
-	replacer = NewSanitizerAttrReplacer(replacer)
-	replacer = NewTimestampAttrReplacer(replacer, FormatTimestampMicro)
+	var s Sanitizer
+	if len(o.sanitizers) > 0 {
+		s = MultiSanitizer(o.sanitizers...)
+	}
+	replacer = NewSanitizerAttrReplacer(s, replacer)
+	replacer = NewTimestampAttrReplacer(replacer, o.timeFormat)
 
-	ho := slog.HandlerOptions{
-		Level:       GetLoggerLeveler(name),
-		ReplaceAttr: replacer.ReplaceAttr,
+	leveler := o.leveler
+	if leveler == nil {
+		leveler = GetLoggerLeveler(name)
 	}
 
-	console := NewConsoleHandler(&ho)
-	remote := NewRemoteHandler()
+	ho := slog.HandlerOptions{
+		Level:       leveler,
+		ReplaceAttr: replacer.ReplaceAttr,
+		AddSource:   o.addSource,
+	}
+
+	var allHandlers []slog.Handler
+	if o.console != nil {
+		allHandlers = append(allHandlers, NewConsoleHandler(&ho, o.console.writer, o.console.format))
+	}
+	allHandlers = append(allHandlers, o.handlers...)
 
 	// inject our handler middleware
-	handler := slogmulti.
-		Pipe(NewErrorAttrsMiddleware()).
-		Handler(slogmulti.Fanout(
-			console,
-			remote,
-		))
+	pipe := slogmulti.Pipe(NewErrorAttrsMiddleware())
+	for _, m := range o.middleware {
+		pipe = pipe.Pipe(m)
+	}
+
+	handler := pipe.Handler(slogmulti.Fanout(
+		allHandlers...,
+	))
 
 	logger := slog.New(handler)
 
@@ -113,30 +236,14 @@ func NewLogger(name string, attrs ...slog.Attr) *slog.Logger {
 	})
 
 	// Apply passed attributes
-	for _, attr := range attrs {
-		logger = logger.With(attr)
+	if len(o.attrs) > 0 {
+		logger = logger.With(lo.ToAnySlice(o.attrs)...)
 	}
 
 	return logger
 }
 
-type goLogWriter struct {
-	*io.PipeWriter
-	scanner *bufio.Scanner
-	logger  StdLogger
-}
-
-func (g goLogWriter) Pump() {
-	for g.scanner.Scan() {
-		g.logger.Print(g.scanner.Text())
-	}
-}
-
-func NewGoLogger(parent FormattingLogger, level slog.Level) *log.Logger {
-	r, w := io.Pipe()
-	s := bufio.NewScanner(r)
-	logger := NewLevelLogger(parent, level)
-	out := goLogWriter{PipeWriter: w, scanner: s, logger: logger}
-	go out.Pump()
-	return log.New(out, "", 0)
+func NewPackageLogger(attrs ...slog.Attr) *slog.Logger {
+	name := PackageLoggerName(2)
+	return NewLogger(name, attrs...)
 }
