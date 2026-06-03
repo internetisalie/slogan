@@ -31,12 +31,18 @@ func RegisterSanitizer(s Sanitizer) {
 }
 
 type SanitizerAttrReplacer struct {
-	next AttrReplacer
+	sanitizer Sanitizer
+	next      AttrReplacer
 }
 
 func (r SanitizerAttrReplacer) ReplaceAttr(groups []string, a slog.Attr) slog.Attr {
-	if sanitizer != nil {
-		a.Value = sanitizer.Sanitize(a)
+	s := r.sanitizer
+	if s == nil {
+		s = sanitizer
+	}
+
+	if s != nil {
+		a.Value = s.Sanitize(a)
 	}
 
 	if r.next != nil {
@@ -46,10 +52,27 @@ func (r SanitizerAttrReplacer) ReplaceAttr(groups []string, a slog.Attr) slog.At
 	return a
 }
 
-func NewSanitizerAttrReplacer(next AttrReplacer) *SanitizerAttrReplacer {
+func NewSanitizerAttrReplacer(sanitizer Sanitizer, next AttrReplacer) *SanitizerAttrReplacer {
 	return &SanitizerAttrReplacer{
-		next: next,
+		sanitizer: sanitizer,
+		next:      next,
 	}
+}
+
+type multiSanitizer struct {
+	sanitizers []Sanitizer
+}
+
+func (m multiSanitizer) Sanitize(a slog.Attr) slog.Value {
+	v := a.Value
+	for _, s := range m.sanitizers {
+		v = s.Sanitize(slog.Attr{Key: a.Key, Value: v})
+	}
+	return v
+}
+
+func MultiSanitizer(sanitizers ...Sanitizer) Sanitizer {
+	return multiSanitizer{sanitizers: sanitizers}
 }
 
 type TimestampAttrReplacer struct {

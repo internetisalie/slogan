@@ -44,7 +44,7 @@ func (h *PlainHandler) WithGroup(name string) slog.Handler {
 }
 
 func (h *PlainHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	if errorTextValue, ok := GetValueAtPath(attrs, ErrorKey, ErrorTextKey); ok {
+	if errorTextValue, ok := GetValueAtPath(attrs, ErrorKey, ErrorMessageKey); ok {
 		return errorHandler{
 			err:     errorTextValue,
 			Handler: h,

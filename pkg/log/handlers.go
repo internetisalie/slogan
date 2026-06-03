@@ -7,13 +7,12 @@ package log
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
 
 	"github.com/samber/mo"
-
-	"code.internetisalie.net/slogan/pkg/errors"
 
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
@@ -31,46 +30,73 @@ const (
 
 var TerminalFormat string
 
-func NewConsoleHandler(ho *slog.HandlerOptions) slog.Handler {
-	format := FormatDefault
-	if isatty.IsTerminal(os.Stdout.Fd()) {
-		format = mo.EmptyableToOption(TerminalFormat).OrElse(FormatTint)
+type environment interface {
+	Getenv(key string) string
+	Setenv(key, value string) error
+}
+
+type realEnv struct{}
+
+func (realEnv) Getenv(key string) string       { return os.Getenv(key) }
+func (realEnv) Setenv(key, value string) error { return os.Setenv(key, value) }
+
+var env environment = realEnv{}
+
+func NewConsoleHandler(ho *slog.HandlerOptions, writer io.Writer, format string) slog.Handler {
+	if writer == nil {
+		writer = os.Stdout
 	}
 
-	if requestedFormat := os.Getenv("LOG_FORMAT"); requestedFormat != "" {
-		requestedFormat = strings.ToLower(requestedFormat)
+	if format == "" {
+		format = FormatDefault
 
-		switch requestedFormat {
-		case FormatJson, FormatLogFmt, FormatHuman, FormatTint, FormatPlain:
-			format = requestedFormat
-		default:
-			_ = os.Setenv("LOG_FORMAT", format)
-			StandardLogger().Error(fmt.Sprintf(
-				"Unknown log format %q.  Defaulting to %q",
-				requestedFormat, format))
+		isTerminal := false
+		if f, ok := writer.(*os.File); ok {
+			isTerminal = isatty.IsTerminal(f.Fd())
+		}
+
+		if isTerminal {
+			format = mo.EmptyableToOption(TerminalFormat).OrElse(FormatTint)
+		}
+
+		if requestedFormat := env.Getenv("LOG_FORMAT"); requestedFormat != "" {
+			requestedFormat = strings.ToLower(requestedFormat)
+
+			switch requestedFormat {
+			case FormatJson, FormatLogFmt, FormatHuman, FormatTint, FormatPlain:
+				format = requestedFormat
+			default:
+				_ = env.Setenv("LOG_FORMAT", format)
+				StandardLogger().Error(fmt.Sprintf(
+					"Unknown log format %q.  Defaulting to %q",
+					requestedFormat, format))
+			}
 		}
 	}
-
-	consoleWriter := os.Stdout
 
 	var console slog.Handler
 	switch format {
 	case FormatJson:
-		console = slog.NewJSONHandler(consoleWriter, ho)
+		console = slog.NewJSONHandler(writer, ho)
 	case FormatLogFmt:
-		console = slog.NewTextHandler(consoleWriter, ho)
+		console = slog.NewTextHandler(writer, ho)
 	case FormatTint:
-		console = tint.NewHandler(consoleWriter, &tint.Options{
+		noColor := true
+		if f, ok := writer.(*os.File); ok {
+			noColor = !isatty.IsTerminal(f.Fd())
+		}
+
+		console = tint.NewHandler(writer, &tint.Options{
 			AddSource:   ho.AddSource,
 			Level:       ho.Level,
 			ReplaceAttr: ho.ReplaceAttr,
 			TimeFormat:  "15:04:05.000000",
-			NoColor:     !isatty.IsTerminal(consoleWriter.Fd()),
+			NoColor:     noColor,
 		})
 	case FormatHuman:
-		console = NewHumanHandler(consoleWriter, ho)
+		console = NewHumanHandler(writer, ho)
 	case FormatPlain:
-		console = NewPlainHandler(consoleWriter, ho)
+		console = NewPlainHandler(writer, ho)
 	}
 	return console
 }
@@ -148,42 +174,78 @@ func NewRemoteHandler() slog.Handler {
 	return new(RemoteProxyHandler)
 }
 
+func walkError(err error, fn func(error)) {
+	if err == nil {
+		return
+	}
+	fn(err)
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		walkError(u.Unwrap(), fn)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			walkError(e, fn)
+		}
+	}
+}
+
 func NewErrorAttrsMiddleware() slogmulti.Middleware {
-	return slogmulti.NewWithAttrsInlineMiddleware(func(attrs []slog.Attr, next func([]slog.Attr) slog.Handler) slog.Handler {
-		// Extract error
+	return slogmulti.NewHandleInlineMiddleware(func(ctx context.Context, record slog.Record, next func(context.Context, slog.Record) error) error {
 		var err error
-		var ia int
-		for i, a := range attrs {
+		var hasError bool
+		record.Attrs(func(a slog.Attr) bool {
 			if a.Key == ErrorKey {
-				ia = i
 				err, _ = a.Value.Any().(error)
-				break
+				hasError = true
+				return false
 			}
-		}
-
-		if err == nil {
-			return next(attrs)
-		}
-
-		attrs[ia] = Attr(ErrorKey, err)
-
-		backTraceBytes := errors.BackTrace(err)
-		attrs = MergeAttrs(attrs, []slog.Attr{
-			{
-				Key: ErrorKey,
-				Value: slog.GroupValue(
-					slog.String(
-						ErrorBacktraceKey,
-						strings.TrimSpace(string(backTraceBytes)),
-					),
-					slog.String(
-						ErrorTextKey,
-						err.Error(),
-					),
-				),
-			},
+			return true
 		})
 
-		return next(attrs)
+		if !hasError || err == nil {
+			return next(ctx, record)
+		}
+
+		// Create a new record to avoid duplicate ErrorKey
+		newRecord := slog.NewRecord(record.Time, record.Level, record.Message, record.PC)
+		record.Attrs(func(a slog.Attr) bool {
+			if a.Key != ErrorKey {
+				newRecord.AddAttrs(a)
+			}
+			return true
+		})
+
+		// Recursively extract metadata from the error chain/tree
+		walkError(err, func(e error) {
+			// Promote level if any error in the chain has a higher level
+			if l, ok := e.(interface{ Level() slog.Level }); ok {
+				if level := l.Level(); level > newRecord.Level {
+					newRecord.Level = level
+				}
+			}
+
+			// Merge attributes from any error in the chain
+			if a, ok := e.(interface{ LogAttrs() []slog.Attr }); ok {
+				newRecord.AddAttrs(a.LogAttrs()...)
+			}
+		})
+
+		// Add enriched error group
+		backTraceBytes := BackTrace(err)
+		newRecord.AddAttrs(slog.Attr{
+			Key: ErrorKey,
+			Value: slog.GroupValue(
+				slog.String(
+					ErrorStackKey,
+					strings.TrimSpace(string(backTraceBytes)),
+				),
+				slog.String(
+					ErrorMessageKey,
+					err.Error(),
+				),
+			),
+		})
+
+		return next(ctx, newRecord)
 	})
 }
