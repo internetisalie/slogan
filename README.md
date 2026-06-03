@@ -187,6 +187,192 @@ masker := log.SanitizerFunc(func(a slog.Attr) slog.Value {
 logger := log.NewLoggerWithOpts("api", log.WithSanitizers(masker))
 ```
 
+## Error Inspection & Diagnostics
+
+### Stack Trace Capture
+
+Capture and inspect stack traces for detailed error diagnostics:
+
+```go
+// Capture current stack
+stack := log.NewStack(0) // skip=0 starts at caller of NewStack
+
+// Use with error decoration
+err := log.Wrap(fmt.Errorf("operation failed"),
+    log.WithErrorStack(), // Automatically captures stack
+)
+
+// Iterate over frames
+for frame := range log.Callers(skip) {
+    file, line := frame.FileLine()
+    funcName := frame.Function()
+    shortName := frame.FunctionShort()
+}
+```
+
+### Error Message Extraction
+
+Extract and analyze error messages from error chains:
+
+```go
+err := fmt.Errorf("db error: %w", fmt.Errorf("connection timeout"))
+
+// Get primary message (first component)
+primary := log.Message(err) // returns "db error"
+
+// Get all message components
+messages := log.Messages(err) // returns []string{"db error", "connection timeout"}
+
+// Generate formatted backtrace
+trace := log.BackTrace(err) // Returns []byte with formatted trace
+
+// Create structured logging map
+logMap := log.LogValues("operation", err, log.NewStack(0))
+// logMap contains: {"message": "operation", "cause": err, "stack": [...]}
+```
+
+### Error String Construction
+
+Build error messages programmatically:
+
+```go
+// Combine message and cause
+errStr := log.ErrorString("operation failed", cause)
+// Returns "operation failed: <cause.Error()>"
+```
+
+## Context Utilities
+
+### Propagating Log Attributes Through Call Chains
+
+Beyond operation tracking, attach arbitrary log attributes to context for automatic inclusion in all logs:
+
+```go
+// Add multiple attributes to context
+ctx = log.ContextWithLogAttrs(ctx,
+    slog.String("request_id", "req-123"),
+    slog.String("user_id", "user-456"),
+)
+
+// Attributes are automatically included in all logs from this context
+logger.InfoContext(ctx, "processing")
+// Output: level=INFO msg="processing" request_id=req-123 user_id=user-456
+
+// Merge with existing attributes (new ones take precedence)
+ctx = log.ContextWithLogAttrs(ctx, slog.String("request_id", "req-789"))
+```
+
+## Handler Types & Output Formats
+
+### Available Handlers
+
+slogan provides multiple output handlers, each optimized for different use cases:
+
+| Handler | Format | Best For | Output |
+| :--- | :--- | :--- | :--- |
+| Human | `human` | Development & debugging | Multi-line formatted text with structure |
+| JSON | `json` | Log aggregation & parsing | Compact JSON objects |
+| Logfmt | `logfmt` (default) | CLI tools & awk/grep | key=value pairs |
+| Tint | `tint` | Terminals with color | Colored key=value pairs |
+| Plain | `plain` | Container logs & simplicity | Message only, no structure |
+
+### Format Selection
+
+```go
+// Auto-detect based on TTY
+logger := log.NewLogger("my-app") // Uses FormatTint on terminals, FormatLogFmt otherwise
+
+// Force specific format
+logger := log.NewLoggerWithOpts("my-app",
+    log.WithFormat(log.FormatJson), // JSON output
+)
+
+// Available format constants:
+// - log.FormatHuman
+// - log.FormatJson
+// - log.FormatLogFmt
+// - log.FormatTint
+// - log.FormatPlain
+```
+
+### Human Format Example
+
+```
+ 12:34:56.123  INFO    simple message
+                       key=value nested.key=value
+
+ 12:34:57.456  WARN    something concerning
+                       reason=timeout retry=3
+```
+
+## Stdlib Compatibility
+
+### LevelLogger (Drop-in Replacement)
+
+For legacy code or frameworks that expect `*log.Logger` from the standard library:
+
+```go
+// Create a LevelLogger wrapping an slog.Logger
+stdLogger := log.NewLevelLogger(logger, slog.LevelInfo)
+
+// Use as drop-in replacement for *log.Logger
+// All standard methods work:
+stdLogger.Print("message")
+stdLogger.Printf("formatted: %v", value)
+stdLogger.Println("multi-line")
+stdLogger.Fatal("fatal error")
+stdLogger.Fatalf("fatal: %s", err)
+stdLogger.Panic("panic!")
+stdLogger.Panicf("panic: %v", err)
+
+// Also supports structured logging:
+stdLogger.Infoln("info")
+stdLogger.Warnln("warning")
+stdLogger.Errorln("error")
+
+// And implements io.Writer for use with frameworks
+io.Writer(stdLogger) // Logs writes as INFO level
+```
+
+### Standard Logger Reference
+
+Get the framework root logger (use sparingly for high-level diagnostics):
+
+```go
+rootLogger := log.StandardLogger() // Named "slogan"
+```
+
+## Attribute Manipulation
+
+For advanced use cases, manipulate structured attributes at the log level:
+
+```go
+// Convert map to attributes
+attrs := log.MapAttrs(map[string]any{
+    "user": "alice",
+    "age": 30,
+})
+
+// Convert slice/array to indexed attributes
+attrs := log.SliceAttrs(reflect.ValueOf([]int{1, 2, 3}))
+// Result: [Attr{Key: "0", ...}, Attr{Key: "1", ...}, ...]
+
+// Navigate nested attribute trees
+value, ok := log.GetValueAtPath(attrs, "user", "profile", "email")
+
+// Set attributes at nested paths (creates groups as needed)
+attrs = log.SetAttrsAtPath(attrs, []string{"user"}, []slog.Attr{
+    slog.String("role", "admin"),
+})
+
+// Merge attribute slices (groups recursively merged)
+merged := log.MergeAttrs(existing, newAttrs)
+
+// Convert values to proper slog.Value types
+val := log.Value(any)     // Handles time.Time, net.IP, custom types
+val := log.Attr("key", any) // Creates complete slog.Attr
+```
+
 ## Reference: Constructor Options
 
 The following options are available via `NewLoggerWithOpts`:
@@ -203,6 +389,15 @@ The following options are available via `NewLoggerWithOpts`:
 | `WithMiddleware(...Middleware)`| Adds custom `slogmulti` middleware to the pipeline. |
 | `WithAddSource(bool)` | Enables/disables inclusion of source file and line number. |
 | `WithoutConsole()` | Disables the default console handler. |
+
+## Performance
+
+slogan is designed for high-performance structured logging without sacrificing features:
+
+- **Efficient Buffer Pooling**: Uses `bytebufferpool` for stack trace rendering and log formatting, reducing allocations
+- **Lazy Stack Capture**: Stack traces are only captured when explicitly requested via `WithErrorStack()`
+- **Attribute Merging**: Efficiently merges attributes using copy-on-write semantics to avoid unnecessary allocations
+- **Dynamic Leveling**: Change log levels at runtime without handler recreation
 
 ## Testing
 
