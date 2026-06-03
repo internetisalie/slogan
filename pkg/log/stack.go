@@ -1,7 +1,6 @@
 package log
 
 import (
-	"bytes"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/samber/lo"
+	"github.com/valyala/bytebufferpool"
 )
 
 // Callers returns an iterator over the call stack frames.
@@ -211,12 +211,13 @@ type Unwrapper interface {
 }
 
 func BackTrace(err error) []byte {
-	buffer := new(bytes.Buffer)
+	buffer := bytebufferpool.Get()
+	defer bytebufferpool.Put(buffer)
 	backTrace(err, buffer, true)
 	return buffer.Bytes()
 }
 
-func backTrace(err error, buffer *bytes.Buffer, root bool) {
+func backTrace(err error, buffer *bytebufferpool.ByteBuffer, root bool) {
 	if err == nil {
 		return
 	}
