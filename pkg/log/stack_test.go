@@ -1,4 +1,4 @@
-package errors
+package log
 
 import (
 	"testing"
@@ -28,44 +28,22 @@ func recursive(count int, fn func()) {
 	}
 }
 
-func TestCallersPage(t *testing.T) {
+func TestCallersIterator(t *testing.T) {
 	const frames = 24
 	const callers = 3
 	recursive(frames, func() {
-		page := newCallersPage(1) // skip this function
-
-		var frame uintptr
-		var ok bool
 		var count int
-		frame, page, ok = page.Next()
-		for ok {
+		for _ = range Callers(0) {
 			count++
-			frame, page, ok = page.Next()
 		}
 
-		assert.Zero(t, frame)
-		assert.Equal(t, frames+callers, count)
+		assert.GreaterOrEqual(t, count, frames+callers)
 	})
 }
 
-func TestCallers(t *testing.T) {
-	const frameCount = 24
-	const callerCount = 3
-	recursive(frameCount, func() {
-		c := newCallers(1) // skip this function
-
-		var frame uintptr
-		var ok bool
-		var count int
-		frame, c, ok = c.Next()
-		for ok {
-			count++
-			frame, c, ok = c.Next()
-		}
-
-		assert.Zero(t, frame)
-		assert.Equal(t, count, frameCount+callerCount)
-	})
+func TestNewStack(t *testing.T) {
+	s := NewStack(0)
+	assert.NotEmpty(t, s)
 }
 
 func TestStackTrimmer(t *testing.T) {

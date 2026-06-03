@@ -1,85 +1,37 @@
-package errors
+package log
 
 import (
 	"bytes"
 	"fmt"
+	"iter"
 	"log/slog"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/samber/lo"
 )
 
-const framePageSize = 16
-
-type callersPage struct {
-	skip   int
-	frames []uintptr
-	off    int
-}
-
-// nextPage returns the next page of caller frames
-func (c callersPage) nextPage() callersPage {
-	// skip Next() and nextPage() calls
-	const skip = 2
-	page := newCallersPage(c.skip + len(c.frames) + skip)
-	page.skip -= skip
-	return page
-}
-
-// Next returns the next available frame, and an updated cursor, and a success indicator.
-func (c callersPage) Next() (uintptr, callersPage, bool) {
-	switch len(c.frames) {
-	case 0:
-		return uintptr(0), callersPage{}, false
-	case c.off:
-		return c.nextPage().Next()
-	default:
-		frame := c.frames[c.off]
-		c.off++
-		return frame, c, true
-	}
-}
-
-func newCallersPage(skip int) callersPage {
-	frames := make([]uintptr, framePageSize)
-	count := runtime.Callers(skip+2, frames) // skip this function and runtime.Callers
-	if count == 0 {
-		return callersPage{}
-	}
-	return callersPage{
-		skip:   skip,
-		frames: frames[:count],
-	}
-}
-
-type callers struct {
-	scanned []Frame
-	page    callersPage
-}
-
-func (c callers) Next() (uintptr, callers, bool) {
-	frame, page, ok := c.page.Next()
-	if ok {
-		if len(c.scanned)%framePageSize == 0 {
-			c.scanned = slices.Grow(c.scanned, framePageSize)
+// Callers returns an iterator over the call stack frames.
+func Callers(skip int) iter.Seq[Frame] {
+	return func(yield func(Frame) bool) {
+		const framePageSize = 32
+		pcs := make([]uintptr, framePageSize)
+		for {
+			n := runtime.Callers(skip+2, pcs)
+			if n == 0 {
+				return
+			}
+			for i := 0; i < n; i++ {
+				if !yield(Frame(pcs[i])) {
+					return
+				}
+			}
+			if n < framePageSize {
+				return
+			}
+			skip += n
 		}
-		c.scanned = append(c.scanned, Frame(frame))
-		c.page = page
-		return frame, c, true
-	}
-	return uintptr(0), c, false
-}
-
-func (c callers) Frames() []Frame {
-	return c.scanned
-}
-
-func newCallers(skip int) callers {
-	return callers{
-		page: newCallersPage(skip + 1),
 	}
 }
 
@@ -160,18 +112,20 @@ func (s Stack) LogValue() slog.Value {
 }
 
 func NewStack(skip int) Stack {
-	var ok bool
-
-	c := newCallers(skip + 1) // skip NewStack()
-	_, c, ok = c.Next()
-	for ok {
-		_, c, ok = c.Next()
+	var s Stack
+	for f := range Callers(skip + 1) {
+		s = append(s, f)
 	}
-	return c.Frames()
+	return s
 }
 
 type BackTracer interface {
 	BackTrace() []byte
+}
+
+type Decorator interface {
+	error
+	IsDecorator()
 }
 
 type Messager interface {
@@ -247,6 +201,7 @@ func WrapSentinel(cause error, message string) error {
 func NewSentinel(message string) error {
 	result := &simple{
 		message: message,
+		cause:   nil,
 	}
 	return result
 }
@@ -257,56 +212,60 @@ type Unwrapper interface {
 
 func BackTrace(err error) []byte {
 	buffer := new(bytes.Buffer)
+	backTrace(err, buffer, true)
+	return buffer.Bytes()
+}
 
-	unwrapper, ok := err.(Unwrapper)
-	var cause error
-	if ok {
-		cause = unwrapper.Unwrap()
+func backTrace(err error, buffer *bytes.Buffer, root bool) {
+	if err == nil {
+		return
 	}
 
-	if cause != nil {
-		if backTracer, ok := cause.(BackTracer); ok {
-			buffer.Write(backTracer.BackTrace())
-		} else {
-			causeMessages := Messages(cause)
-			slices.Reverse(causeMessages)
+	interesting := isInteresting(err)
+	if interesting {
+		if root {
 			buffer.WriteString("Root Cause: ")
-			buffer.WriteString(causeMessages[0])
-			buffer.WriteString("\n")
-			for i, causeMessage := range causeMessages {
-				if i == 0 {
-					continue
-				}
-				buffer.WriteString("Caused: ")
-				buffer.WriteString(causeMessage)
+		} else {
+			buffer.WriteString("Caused: ")
+		}
+		buffer.WriteString(Message(err))
+		buffer.WriteString("\n")
+
+		if stacker, ok := err.(Stacker); ok {
+			for _, frame := range stacker.Stack() {
+				buffer.WriteString("  ")
+				buffer.WriteString(frame.Function())
+				buffer.WriteString("\n")
+
+				file, line := frame.FileLine()
+				buffer.WriteString("    ")
+				buffer.WriteString(file)
+				buffer.WriteString(":")
+				buffer.WriteString(strconv.Itoa(line))
 				buffer.WriteString("\n")
 			}
 		}
-
-		buffer.WriteString("Caused: ")
-	} else {
-		buffer.WriteString("Root Cause: ")
 	}
 
-	buffer.WriteString(Message(err))
-	buffer.WriteString("\n")
-
-	if stacker, ok := err.(Stacker); ok {
-		for _, frame := range stacker.Stack() {
-			buffer.WriteString("  ")
-			buffer.WriteString(frame.Function())
-			buffer.WriteString("\n")
-
-			file, line := frame.FileLine()
-			buffer.WriteString("    ")
-			buffer.WriteString(file)
-			buffer.WriteString(":")
-			buffer.WriteString(strconv.Itoa(line))
-			buffer.WriteString("\n")
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		backTrace(u.Unwrap(), buffer, !interesting && root)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			backTrace(e, buffer, !interesting && root)
 		}
 	}
+}
 
-	return buffer.Bytes()
+func isInteresting(err error) bool {
+	if _, ok := err.(Decorator); ok {
+		// If it has a stack, it's interesting despite being a decorator
+		if s, ok := err.(Stacker); ok && len(s.Stack()) > 0 {
+			return true
+		}
+		return false
+	}
+	return true
 }
 
 func ErrorString(message string, cause error) string {
