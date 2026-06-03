@@ -1,12 +1,11 @@
 package log
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"sync"
-
-	"github.com/samber/lo"
 )
 
 const (
@@ -18,20 +17,18 @@ const (
 )
 
 var (
-	loggerLevels     = make(map[string]*slog.LevelVar)
-	loggerLevelsLock sync.Mutex
+	loggerLevels        = make(map[string]*slog.LevelVar)
+	loggerLevelsLock    sync.Mutex
+	defaultLoggerLevel  slog.Level = LevelInfo
 )
 
 func SetAllLoggerLevels(level slog.Level) {
-	names := func() []string {
-		loggerLevelsLock.Lock()
-		defer loggerLevelsLock.Unlock()
+	loggerLevelsLock.Lock()
+	defer loggerLevelsLock.Unlock()
 
-		return lo.Keys(loggerLevels)
-	}()
-
-	for _, name := range names {
-		SetLoggerLevel(name, level)
+	defaultLoggerLevel = level
+	for _, v := range loggerLevels {
+		v.Set(level)
 	}
 }
 
@@ -46,6 +43,7 @@ func GetLoggerLeveler(name string) *slog.LevelVar {
 	existingLevel, ok := loggerLevels[name]
 	if !ok {
 		existingLevel = new(slog.LevelVar)
+		existingLevel.Set(defaultLoggerLevel)
 		loggerLevels[name] = existingLevel
 	}
 
@@ -53,79 +51,76 @@ func GetLoggerLeveler(name string) *slog.LevelVar {
 }
 
 type LevelLogger struct {
-	parent FormattingLogger
+	parent *slog.Logger
 	level  slog.Level
 }
 
 type StdLogger interface {
-	Print(...interface{})
-	Printf(string, ...interface{})
-	Println(...interface{})
+	Print(values ...interface{})
+	Printf(format string, values ...interface{})
+	Println(values ...interface{})
 
-	Fatal(...interface{})
-	Fatalf(string, ...interface{})
-	Fatalln(...interface{})
+	Fatal(values ...interface{})
+	Fatalf(format string, values ...interface{})
+	Fatalln(values ...interface{})
 
-	Panic(...interface{})
-	Panicf(string, ...interface{})
-	Panicln(...interface{})
+	Panic(values ...interface{})
+	Panicf(format string, values ...interface{})
+	Panicln(values ...interface{})
 }
 
-func NewLevelLogger(logger FormattingLogger, level slog.Level) StdLogger {
+func NewLevelLogger(parent *slog.Logger, level slog.Level) *LevelLogger {
 	return &LevelLogger{
-		parent: logger,
+		parent: parent,
 		level:  level,
 	}
 }
 
-func (l *LevelLogger) Printf(template string, values ...interface{}) {
-	msg := fmt.Sprintf(template, values...)
-	l.parent.Log(nil, l.level, msg)
+func (l *LevelLogger) Printf(format string, values ...interface{}) {
+	l.parent.Log(context.Background(), l.level, fmt.Sprintf(format, values...))
 }
 
 func (l *LevelLogger) Print(values ...interface{}) {
-	msg := fmt.Sprint(values...)
-	l.parent.Log(nil, l.level, msg)
+	l.parent.Log(context.Background(), l.level, fmt.Sprint(values...))
 }
 
 func (l *LevelLogger) Println(values ...interface{}) {
-	msg := fmt.Sprint(values...)
-	l.parent.Log(nil, l.level, msg)
+	l.parent.Log(context.Background(), l.level, fmt.Sprint(values...))
 }
 
 func (l *LevelLogger) Fatal(values ...interface{}) {
 	msg := fmt.Sprint(values...)
-	l.parent.Log(nil, LevelError, msg)
+	l.parent.Log(context.Background(), LevelError, msg)
 	os.Exit(1)
 }
 
-func (l *LevelLogger) Fatalf(template string, values ...interface{}) {
-	msg := fmt.Sprintf(template, values...)
-	l.parent.Log(nil, LevelError, msg)
+func (l *LevelLogger) Fatalf(format string, values ...interface{}) {
+	msg := fmt.Sprintf(format, values...)
+	l.parent.Log(context.Background(), LevelError, msg)
 	os.Exit(1)
 }
 
 func (l *LevelLogger) Fatalln(values ...interface{}) {
 	msg := fmt.Sprint(values...)
-	l.parent.Log(nil, LevelError, msg)
+	l.parent.Log(context.Background(), LevelError, msg)
 	os.Exit(1)
 }
 
 func (l *LevelLogger) Panic(values ...interface{}) {
 	msg := fmt.Sprint(values...)
-	l.parent.Log(nil, LevelError, msg)
+	l.parent.Log(context.Background(), LevelError, msg)
 	panic(msg)
 }
 
-func (l *LevelLogger) Panicf(template string, values ...interface{}) {
-	msg := fmt.Sprintf(template, values...)
-	l.parent.Log(nil, LevelError, msg)
+func (l *LevelLogger) Panicf(format string, values ...interface{}) {
+	msg := fmt.Sprintf(format, values...)
+	l.parent.Log(context.Background(), LevelError, msg)
 	panic(msg)
 }
 
 func (l *LevelLogger) Panicln(values ...interface{}) {
 	msg := fmt.Sprint(values...)
-	l.parent.Log(nil, LevelError, msg)
+	l.parent.Log(context.Background(), LevelError, msg)
 	panic(msg)
 }
 
