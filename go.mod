@@ -10,6 +10,7 @@ require (
 	github.com/samber/mo v1.13.0
 	github.com/samber/slog-multi v1.2.0
 	github.com/stretchr/testify v1.9.0
+	github.com/valyala/bytebufferpool v1.0.0
 )
 
 require (
