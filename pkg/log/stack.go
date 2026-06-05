@@ -262,7 +262,9 @@ func BackTrace(err error) []byte {
 	buffer := bytebufferpool.Get()
 	defer bytebufferpool.Put(buffer)
 	backTrace(err, buffer, true)
-	return buffer.Bytes()
+	res := make([]byte, len(buffer.Bytes()))
+	copy(res, buffer.Bytes())
+	return res
 }
 
 func backTrace(err error, buffer *bytebufferpool.ByteBuffer, root bool) {
