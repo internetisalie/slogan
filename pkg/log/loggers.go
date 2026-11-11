@@ -131,8 +131,9 @@ type loggerOptions struct {
 // LoggerOptions are passed to NewLoggerWithOpts to customize logger creation.
 type LoggerOption func(*loggerOptions)
 
-// WithWriter sets the output writer for console logging.
-// If not specified, defaults to os.Stdout.
+// WithWriter sets a fixed output writer for console logging.
+// If not specified, or nil, the logger writes to the root destination set by
+// ConfigureRoot, which is os.Stdout until ConfigureRoot is called.
 func WithWriter(w io.Writer) LoggerOption {
 	return func(o *loggerOptions) {
 		if o.console == nil {
@@ -272,7 +273,11 @@ func NewLoggerWithOpts(name string, opts ...LoggerOption) *slog.Logger {
 
 	var allHandlers []slog.Handler
 	if o.console != nil {
-		allHandlers = append(allHandlers, NewConsoleHandler(&ho, o.console.writer, o.console.format))
+		if o.console.writer == nil {
+			allHandlers = append(allHandlers, newRootConsoleHandler(&ho, o.console.format))
+		} else {
+			allHandlers = append(allHandlers, NewConsoleHandler(&ho, o.console.writer, o.console.format))
+		}
 	}
 	allHandlers = append(allHandlers, o.handlers...)
 

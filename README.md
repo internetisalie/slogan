@@ -87,6 +87,18 @@ logger := log.NewLoggerWithOpts("my-app",
 )
 ```
 
+### Root Destination
+
+A command whose stdout carries its output points every logger at stderr once, at its start:
+
+```go
+log.ConfigureRoot(os.Stderr)
+```
+
+Every logger built without `WithWriter` follows the root destination, including loggers created
+before the call. The destination is `os.Stdout` until `ConfigureRoot` is called. `ConfigureRoot`
+also makes `slog.Default()` write there.
+
 ### Dynamic Level Management
 
 Control log levels for all loggers or specific ones at runtime:
@@ -379,7 +391,7 @@ The following options are available via `NewLoggerWithOpts`:
 
 | Option | Description |
 | :--- | :--- |
-| `WithWriter(io.Writer)` | Sets the output writer for the default console handler. |
+| `WithWriter(io.Writer)` | Sets a fixed output writer for the default console handler. Without it the logger follows the root destination (`ConfigureRoot`, default `os.Stdout`). |
 | `WithFormat(string)` | Sets the output format (`json`, `logfmt`, `human`, `tint`, `plain`). |
 | `WithAttrs(...slog.Attr)` | Adds default attributes to all log records. |
 | `WithLeveler(slog.Leveler)` | Sets the dynamic level controller for the logger. |
