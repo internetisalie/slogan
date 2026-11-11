@@ -7,6 +7,7 @@ import (
 	stdlog "log"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -39,18 +40,17 @@ func restoreRootAfterTest(t *testing.T) {
 	})
 }
 
-func TestRestoreRootAfterTestPutsTheStandardLogPackageBack(t *testing.T) {
-	writer, flags, prefix := stdlog.Writer(), stdlog.Flags(), stdlog.Prefix()
+func TestConfigureRootLeavesAFileUnwrappedAndLocksOtherWriters(t *testing.T) {
+	restoreRootAfterTest(t)
+	file, err := os.Create(filepath.Join(t.TempDir(), "root.log"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, file.Close()) })
 
-	t.Run("configures the root", func(t *testing.T) {
-		restoreRootAfterTest(t)
-		ConfigureRoot(&bytes.Buffer{})
-		require.NotSame(t, writer, stdlog.Writer())
-	})
+	ConfigureRoot(file)
+	assert.Same(t, file, rootDest.Load().writer)
 
-	assert.Same(t, writer, stdlog.Writer())
-	assert.Equal(t, flags, stdlog.Flags())
-	assert.Equal(t, prefix, stdlog.Prefix())
+	ConfigureRoot(&bytes.Buffer{})
+	assert.IsType(t, &lockedWriter{}, rootDest.Load().writer)
 }
 
 func TestPackageLoggerCreatedBeforeConfigureRootWritesToRoot(t *testing.T) {
