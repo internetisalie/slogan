@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
+	"sync"
 	"sync/atomic"
 )
 
@@ -18,6 +20,19 @@ type rootDestination struct {
 // which means os.Stdout.
 var rootDest atomic.Pointer[rootDestination]
 
+// lockedWriter serialises Write calls, so every handler derived from one logger, which
+// each hold their own handler, can share one destination without a data race.
+type lockedWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.writer.Write(p)
+}
+
 // ConfigureRoot sets the process's root destination to w and makes the root slog logger
 // (slog.Default) write to it. A nil w means os.Stdout; it is not an error and not a reset.
 //
@@ -26,9 +41,17 @@ var rootDest atomic.Pointer[rootDestination]
 // so no logger is rebuilt. The destination is os.Stdout until ConfigureRoot is called.
 // A logger built with WithWriter keeps its explicit writer.
 //
+// Writes to the root destination are serialised, across every logger that follows it and
+// the slog default logger, so w need not be safe for concurrent use. A nil w and an
+// *os.File are used as they are: each record is one Write on the file, and the handler
+// reads the file to tell a terminal.
+//
 // ConfigureRoot creates no named logger and does not touch StandardLogger. It replaces the
 // slog default logger, which also routes the standard library's log package to w.
 func ConfigureRoot(w io.Writer) {
+	if _, isFile := w.(*os.File); w != nil && !isFile {
+		w = &lockedWriter{writer: w}
+	}
 	rootDest.Store(&rootDestination{writer: w})
 
 	ho := slog.HandlerOptions{

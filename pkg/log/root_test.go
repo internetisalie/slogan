@@ -2,9 +2,12 @@ package log
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -61,7 +64,68 @@ func TestDerivedLoggerCarriesAttrsAndGroupInOrderToRoot(t *testing.T) {
 	logger.With("a", "1").WithGroup("g").With("b", "2").Info("derived record", "c", "3")
 
 	assert.Contains(t, buf.String(), `msg="derived record"`)
-	assert.Contains(t, buf.String(), "a=1 g.b=2 g.c=3")
+	assert.Regexp(t, `\sa=1 g\.b=2 g\.c=3\s*$`, buf.String())
+}
+
+func TestPackageLoggerLevelGatesRecordsToRoot(t *testing.T) {
+	restoreRootAfterTest(t)
+	info := NewLoggerWithOpts("info", WithLeveler(slog.LevelInfo))
+	debug := NewLoggerWithOpts("debug", WithLeveler(slog.LevelDebug))
+
+	buf := &bytes.Buffer{}
+	ConfigureRoot(buf)
+	info.Log(context.Background(), LevelTrace, "info trace record")
+	info.Debug("info debug record")
+	info.Info("info info record")
+	debug.Debug("debug debug record")
+
+	assert.NotContains(t, buf.String(), "info trace record")
+	assert.NotContains(t, buf.String(), "info debug record")
+	assert.Contains(t, buf.String(), `msg="info info record"`)
+	assert.Contains(t, buf.String(), `msg="debug debug record"`)
+}
+
+func TestSiblingLoggersDerivedFromOneParentCarryOnlyTheirOwnAttrs(t *testing.T) {
+	restoreRootAfterTest(t)
+	parent := NewLoggerWithOpts("parent").With("a", "1").With("b", "2")
+	first := parent.With("first_attr", "x")
+	second := parent.With("second_attr", "y")
+
+	buf := &bytes.Buffer{}
+	ConfigureRoot(buf)
+	first.Info("first record")
+	second.Info("second record")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[0], "first_attr=x")
+	assert.NotContains(t, lines[0], "second_attr")
+	assert.Contains(t, lines[1], "second_attr=y")
+	assert.NotContains(t, lines[1], "first_attr")
+}
+
+func TestDerivedLoggersWriteConcurrentlyToOneRootWriter(t *testing.T) {
+	restoreRootAfterTest(t)
+	parent := NewLoggerWithOpts("concurrent").With("a", "1")
+	first := parent.With("which", "first")
+	second := parent.With("which", "second")
+
+	buf := &bytes.Buffer{}
+	ConfigureRoot(buf)
+	const records = 100
+	var wg sync.WaitGroup
+	for _, logger := range []*slog.Logger{first, second} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range records {
+				logger.Info("concurrent record")
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, 2*records, strings.Count(buf.String(), `msg="concurrent record"`))
 }
 
 func TestConfigureRootDestinationChangeMovesSubsequentRecords(t *testing.T) {
