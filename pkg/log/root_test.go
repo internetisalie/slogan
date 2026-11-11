@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	stdlog "log"
 	"log/slog"
 	"os"
 	"strings"
@@ -15,22 +16,41 @@ import (
 )
 
 // restoreRootAfterTest puts the root destination back to unconfigured and the slog default
-// logger back to what it was, when the test ends. It also unregisters the remote handler
-// factory for the test: with one registered, the remote handler of every logger writes a
-// second copy of each record to the slog default logger, which ConfigureRoot points at the
-// test's buffer.
+// logger and the standard log package back to what they were, when the test ends: restoring
+// the slog default does not undo the rerouting of the log package, so its writer, flags and
+// prefix are put back too. It also unregisters the remote handler factory for the test: with
+// one registered, the remote handler of every logger writes a second copy of each record to
+// the slog default logger, which ConfigureRoot points at the test's buffer.
 func restoreRootAfterTest(t *testing.T) {
 	t.Helper()
 
 	t.Setenv("LOG_FORMAT", FormatLogFmt)
 	previous := slog.Default()
+	previousWriter, previousFlags, previousPrefix := stdlog.Writer(), stdlog.Flags(), stdlog.Prefix()
 	previousFactory := registeredRemoteHandlerFactory
 	registeredRemoteHandlerFactory = nil
 	t.Cleanup(func() {
 		rootDest.Store(nil)
 		slog.SetDefault(previous)
+		stdlog.SetOutput(previousWriter)
+		stdlog.SetFlags(previousFlags)
+		stdlog.SetPrefix(previousPrefix)
 		registeredRemoteHandlerFactory = previousFactory
 	})
+}
+
+func TestRestoreRootAfterTestPutsTheStandardLogPackageBack(t *testing.T) {
+	writer, flags, prefix := stdlog.Writer(), stdlog.Flags(), stdlog.Prefix()
+
+	t.Run("configures the root", func(t *testing.T) {
+		restoreRootAfterTest(t)
+		ConfigureRoot(&bytes.Buffer{})
+		require.NotSame(t, writer, stdlog.Writer())
+	})
+
+	assert.Same(t, writer, stdlog.Writer())
+	assert.Equal(t, flags, stdlog.Flags())
+	assert.Equal(t, prefix, stdlog.Prefix())
 }
 
 func TestPackageLoggerCreatedBeforeConfigureRootWritesToRoot(t *testing.T) {
@@ -85,6 +105,18 @@ func TestPackageLoggerLevelGatesRecordsToRoot(t *testing.T) {
 	assert.Contains(t, buf.String(), `msg="debug debug record"`)
 }
 
+func TestPackageLoggerWithFormatKeepsItOnTheRootPath(t *testing.T) {
+	restoreRootAfterTest(t)
+	logger := NewLoggerWithOpts("formatted", WithFormat(FormatJson))
+
+	buf := &bytes.Buffer{}
+	ConfigureRoot(buf)
+	logger.Info("formatted record")
+
+	assert.True(t, strings.HasPrefix(buf.String(), "{"), buf.String())
+	assert.Contains(t, buf.String(), `"msg":"formatted record"`)
+}
+
 func TestSiblingLoggersDerivedFromOneParentCarryOnlyTheirOwnAttrs(t *testing.T) {
 	restoreRootAfterTest(t)
 	parent := NewLoggerWithOpts("parent").With("a", "1").With("b", "2")
@@ -114,7 +146,7 @@ func TestDerivedLoggersWriteConcurrentlyToOneRootWriter(t *testing.T) {
 	ConfigureRoot(buf)
 	const records = 100
 	var wg sync.WaitGroup
-	for _, logger := range []*slog.Logger{first, second} {
+	for _, logger := range []*slog.Logger{first, second, slog.Default()} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -125,7 +157,7 @@ func TestDerivedLoggersWriteConcurrentlyToOneRootWriter(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.Equal(t, 2*records, strings.Count(buf.String(), `msg="concurrent record"`))
+	assert.Equal(t, 3*records, strings.Count(buf.String(), `msg="concurrent record"`))
 }
 
 func TestConfigureRootDestinationChangeMovesSubsequentRecords(t *testing.T) {
@@ -159,6 +191,7 @@ func TestPackageLoggerWritesToStdoutBeforeConfigureRoot(t *testing.T) {
 	require.NoError(t, writer.Close())
 	output, err := io.ReadAll(reader)
 	require.NoError(t, err)
+	require.NoError(t, reader.Close())
 	assert.Contains(t, string(output), `msg="stdout record"`)
 }
 
@@ -181,7 +214,9 @@ func TestDefaultSlogLoggerWritesToRootAfterConfigureRoot(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	ConfigureRoot(buf)
+	slog.Default().Debug("default debug record")
 	slog.Default().Info("default record")
 
+	assert.NotContains(t, buf.String(), "default debug record")
 	assert.Contains(t, buf.String(), `msg="default record"`)
 }

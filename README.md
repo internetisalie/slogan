@@ -97,7 +97,8 @@ log.ConfigureRoot(os.Stderr)
 
 Every logger built without `WithWriter` follows the root destination, including loggers created
 before the call. The destination is `os.Stdout` until `ConfigureRoot` is called. `ConfigureRoot`
-also makes `slog.Default()` write there.
+also makes `slog.Default()` write there, at `slog.LevelInfo`, and routes the standard library's
+`log` package there; setting `slog.Default()` back later does not undo that routing.
 
 ### Dynamic Level Management
 

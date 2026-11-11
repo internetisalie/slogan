@@ -46,8 +46,10 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 // *os.File are used as they are: each record is one Write on the file, and the handler
 // reads the file to tell a terminal.
 //
-// ConfigureRoot creates no named logger and does not touch StandardLogger. It replaces the
-// slog default logger, which also routes the standard library's log package to w.
+// ConfigureRoot creates no package logger and does not touch StandardLogger. It replaces the
+// slog default logger, which also routes the standard library's log package to w. The default
+// logger is at slog.LevelInfo, the level slog's own default filters at; the level of a package
+// logger is its own leveler's.
 func ConfigureRoot(w io.Writer) {
 	if _, isFile := w.(*os.File); w != nil && !isFile {
 		w = &lockedWriter{writer: w}
@@ -55,7 +57,7 @@ func ConfigureRoot(w io.Writer) {
 	rootDest.Store(&rootDestination{writer: w})
 
 	ho := slog.HandlerOptions{
-		Level:       LevelTrace,
+		Level:       slog.LevelInfo,
 		ReplaceAttr: NewTimestampAttrReplacer(nil, FormatTimestampMicro).ReplaceAttr,
 	}
 	slog.SetDefault(slog.New(NewConsoleHandler(&ho, w, "")))
